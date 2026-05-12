@@ -66,6 +66,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
 
     team_names = list(roster_id_to_team_name.values())
     team_names.sort()
+    num_teams = len(team_names) # Dynamically identify league size (e.g. 12)
     
     roster_map = {name: {} for name in team_names}
     all_rostered_players = set()
@@ -137,16 +138,27 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         if curr_owner_team:
             season_val, round_val, orig_roster_id = int(pick['season']), int(pick['round']), pick["original_roster_id"]
             base_str = f"{season_val} Round {round_val}"
-            slot_val, sort_slot = 6, 99
+            
+            # Default to true mid-round for unknown future picks
+            slot_val, sort_slot = (num_teams // 2), 99
             
             if str(season_val) == str(league_season) and orig_roster_id in roster_id_to_slot:
-                slot_val = roster_id_to_slot[orig_roster_id]
+                base_slot = roster_id_to_slot[orig_roster_id]
+                
+                # --- SNAKE DRAFT LOGIC ---
+                if round_val % 2 == 0:
+                    # Even Round: Reverse the slot
+                    slot_val = num_teams - base_slot + 1
+                else:
+                    # Odd Round: Standard slot
+                    slot_val = base_slot
+                    
                 sort_slot = slot_val
                 base_str += f" ({round_val}.{slot_val:02d})"
                 
             pick_str = base_str if pick["current_owner_id"] == pick["original_roster_id"] else f"{base_str} (via {orig_owner_team})"
             
-            overall_pick_index = ((round_val - 1) * 12) + (slot_val - 1)
+            overall_pick_index = ((round_val - 1) * num_teams) + (slot_val - 1)
             if overall_pick_index < len(draft_pool_values):
                 pick_values_dict[pick_str] = draft_pool_values[overall_pick_index]
             else:
@@ -218,7 +230,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         with ai_col_title:
             st.subheader("🤖 AI Package Trade Generator")
         with ai_col_btn:
-            # Clicking this button forces a script rerun, engaging the random jitter for new trades
             st.button("🔄 Refresh Trades", use_container_width=True)
 
         phase = st.radio("Strategic Focus:", ["🌴 Offseason (Consolidate depth into elite Keepers)", "🏈 In-Season (Liquidate elites for depth/picks)"], horizontal=True)
@@ -306,7 +317,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                             if best_incoming_val > keepers[3]['Value'] + 800:
                                 impact_score += 2500 
                                 
-                        # Introduce Random Jitter to shuffle equally valuable trades when the user hits "Refresh"
                         impact_score += random.randint(-500, 500)
 
                         trade_type = f"{my_pkg['count']}-for-{their_pkg['count']}"
@@ -384,13 +394,11 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
 
         st.divider()
         
-        # DUPLICATE CATCHER LOGIC
         a_has_dupes = len(team_a_offers) != len(set(team_a_offers))
         b_has_dupes = len(team_b_offers) != len(set(team_b_offers))
         
         if a_has_dupes or b_has_dupes:
             st.warning("⚠️ **Duplicate Assets Detected:** You have added the same asset multiple times. The calculator has automatically filtered them out to ensure accurate valuation.")
-            # Strip duplicates while preserving order
             team_a_offers = list(dict.fromkeys(team_a_offers))
             team_b_offers = list(dict.fromkeys(team_b_offers))
 
