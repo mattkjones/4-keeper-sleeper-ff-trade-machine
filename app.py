@@ -50,6 +50,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
 
     user_dict = {u.get('user_id'): u for u in users}
     roster_id_to_team_name = {}
+    team_records = {} # NEW: Dictionary to store win/loss records
     
     for roster in rosters:
         r_id = roster.get('roster_id')
@@ -63,10 +64,17 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             t_name = r_metadata.get('team_name') or u_metadata.get('team_name') or display_name
             formatted_name = f"{t_name} ({display_name})"
         roster_id_to_team_name[r_id] = formatted_name
+        
+        # Read the live Win/Loss record for the dynamic AI logic
+        settings = roster.get('settings') or {}
+        team_records[formatted_name] = {
+            'wins': settings.get('wins', 0),
+            'losses': settings.get('losses', 0)
+        }
 
     team_names = list(roster_id_to_team_name.values())
     team_names.sort()
-    num_teams = len(team_names) # Dynamically identify league size (e.g. 12)
+    num_teams = len(team_names)
     
     roster_map = {name: {} for name in team_names}
     all_rostered_players = set()
@@ -139,18 +147,13 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             season_val, round_val, orig_roster_id = int(pick['season']), int(pick['round']), pick["original_roster_id"]
             base_str = f"{season_val} Round {round_val}"
             
-            # Default to true mid-round for unknown future picks
             slot_val, sort_slot = (num_teams // 2), 99
             
             if str(season_val) == str(league_season) and orig_roster_id in roster_id_to_slot:
                 base_slot = roster_id_to_slot[orig_roster_id]
-                
-                # --- SNAKE DRAFT LOGIC ---
                 if round_val % 2 == 0:
-                    # Even Round: Reverse the slot
                     slot_val = num_teams - base_slot + 1
                 else:
-                    # Odd Round: Standard slot
                     slot_val = base_slot
                     
                 sort_slot = slot_val
@@ -232,8 +235,22 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         with ai_col_btn:
             st.button("🔄 Refresh Trades", use_container_width=True)
 
-        phase = st.radio("Strategic Focus:", ["🌴 Offseason (Consolidate depth into elite Keepers)", "🏈 In-Season (Liquidate elites for depth/picks)"], horizontal=True)
+        phase = st.radio("Season Phase:", ["🌴 Offseason", "🏈 In-Season"], horizontal=True)
         is_offseason = "Offseason" in phase
+
+        my_record = team_records.get(my_team, {'wins': 0, 'losses': 0})
+        
+        # --- DYNAMIC STRATEGY ASSIGNMENT ---
+        if is_offseason:
+            st.markdown("*Strategic Focus: **Offseason** (Consolidating depth into 4 Elite Keepers)*")
+            my_strategy = "CONSOLIDATE"
+        else:
+            if my_record['wins'] >= my_record['losses']:
+                st.markdown(f"*Strategic Focus: **In-Season Contender** ({my_record['wins']}-{my_record['losses']}) — Leveraging picks & bench depth to acquire premium starters.*")
+                my_strategy = "CONSOLIDATE"
+            else:
+                st.markdown(f"*Strategic Focus: **In-Season Rebuilder** ({my_record['wins']}-{my_record['losses']}) — Liquidating elite assets for draft capital & youth.*")
+                my_strategy = "LIQUIDATE"
 
         st.markdown("*Note: The AI applies a 'Consolidation Tax' (10-15% penalty) to the team trading away more assets, ensuring realistic package deals.*")
 
@@ -251,8 +268,9 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     combos.append({"assets": names, "full_assets": c, "raw_value": raw_val, "taxed_value": taxed_val, "count": r})
             return combos
 
-        if is_offseason:
-            viable_bench = [p for p in trade_block if p['Value'] >= keeper_cutoff_value]
+        # Setup My Trade Pool based on dynamic strategy
+        if my_strategy == "CONSOLIDATE":
+            viable_bench = [p for p in trade_block if p['Value'] >= keeper_cutoff_value] if is_offseason else trade_block[:3]
             my_trade_pool = (keepers[-1:] if len(keepers)==4 else []) + viable_bench[:3] + my_picks[:2]
         else:
             my_trade_pool = keepers[:2] + trade_block[:2] + my_picks[:1]
@@ -269,8 +287,15 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             other_block = other_players[4:]
             other_picks = [{"Player": p, "Value": get_asset_value(p), "Pos": "PICK"} for p in team_picks.get(other_team, [])]
             
+            # Read the other team's win/loss record to determine what they are likely willing to do
+            other_record = team_records.get(other_team, {'wins': 0, 'losses': 0})
             if is_offseason:
-                their_viable_bench = [p for p in other_block if p['Value'] >= keeper_cutoff_value]
+                other_strategy = "CONSOLIDATE"
+            else:
+                other_strategy = "CONSOLIDATE" if other_record['wins'] >= other_record['losses'] else "LIQUIDATE"
+
+            if other_strategy == "CONSOLIDATE":
+                their_viable_bench = [p for p in other_block if p['Value'] >= keeper_cutoff_value] if is_offseason else other_block[:3]
                 their_trade_pool = other_keepers[1:4] + their_viable_bench[:2] + other_picks[:2]
             else:
                 their_trade_pool = other_keepers[:3] + other_block[:3] + other_picks[:1]
@@ -284,10 +309,11 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     if diff <= (my_pkg['taxed_value'] * 0.10):
                         if my_pkg['taxed_value'] < 1000: continue
                         
-                        if is_offseason:
-                            if my_pkg['count'] <= their_pkg['count']: continue
+                        # Enforce Directional Logic based on Strategy
+                        if my_strategy == "CONSOLIDATE":
+                            if my_pkg['count'] < their_pkg['count']: continue
                         else:
-                            if my_pkg['count'] >= their_pkg['count']: continue
+                            if my_pkg['count'] > their_pkg['count']: continue
 
                         if is_offseason:
                             my_incoming_players = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
@@ -327,8 +353,13 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                         
                         if trade_key not in seen_trades:
                             seen_trades.add(trade_key)
-                            logic = f"Consolidating into elite assets." if is_offseason else f"Liquidating elite asset for depth."
-                            sug_text = f"**Trade with {other_team} [{trade_type}]:**\n* **You Send:** {send_str} *(Raw: {int(my_pkg['raw_value']):,})*\n* **You Receive:** {rec_str} *(Raw: {int(their_pkg['raw_value']):,})*\n*Logic: {logic}*"
+                            
+                            if my_strategy == "CONSOLIDATE":
+                                logic_str = f"Consolidating into a premium asset." if my_pkg['count'] > their_pkg['count'] else "Even-asset roster upgrade."
+                            else:
+                                logic_str = f"Liquidating elite asset for depth/picks." if my_pkg['count'] < their_pkg['count'] else "Even-asset pivot for future upside."
+                            
+                            sug_text = f"**Trade with {other_team} [{trade_type}]:**\n* **You Send:** {send_str} *(Raw: {int(my_pkg['raw_value']):,})*\n* **You Receive:** {rec_str} *(Raw: {int(their_pkg['raw_value']):,})*\n*Logic: {logic_str}*"
                             
                             suggestions.append({
                                 "text": sug_text,
@@ -352,7 +383,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             for sug in final_suggestions: 
                 st.info(sug['text'])
         else:
-            st.success("No suggested trades at this time.")
+            st.success("No suggested trades align with your team's current strategic focus. Try adjusting your roster manually in the Ledger.")
 
     # --- PAGE 2: TRADE CALCULATOR ---
     def render_trade_calculator():
