@@ -131,10 +131,40 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         pid = roster_map.get(team_name, {}).get(player_name)
         if pid and nfl_players.get(pid):
             status = nfl_players[pid].get('injury_status')
-            # Filter out players who are officially Out, on IR, or PUP
             if status and status.upper() in ['OUT', 'IR', 'PUP']:
                 return True
         return False
+
+    # DYNAMIC STARTING LINEUP CALCULATOR (1 QB, 2 RB, 2 WR, 1 TE, 1 FLEX)
+    def get_starters(team_player_data):
+        starters = set()
+        sorted_players = sorted(team_player_data, key=lambda x: x['Value'], reverse=True)
+        counts = {'QB': 0, 'RB': 0, 'WR': 0, 'TE': 0, 'FLEX': 0}
+        
+        for p in sorted_players:
+            pos = p['Pos']
+            is_starter = False
+            
+            if pos == 'QB' and counts['QB'] < 1:
+                is_starter = True
+                counts['QB'] += 1
+            elif pos == 'RB' and counts['RB'] < 2:
+                is_starter = True
+                counts['RB'] += 1
+            elif pos == 'WR' and counts['WR'] < 2:
+                is_starter = True
+                counts['WR'] += 1
+            elif pos == 'TE' and counts['TE'] < 1:
+                is_starter = True
+                counts['TE'] += 1
+            elif pos in ['RB', 'WR', 'TE'] and counts['FLEX'] < 1:
+                is_starter = True
+                counts['FLEX'] += 1
+                
+            if is_starter:
+                starters.add(p['Player'])
+                
+        return starters
 
     draft_pool_df = value_df[~value_df['Player'].isin(all_rostered_players)].sort_values(by="Value", ascending=False).reset_index(drop=True)
     draft_pool_values = draft_pool_df['Value'].tolist()
@@ -278,6 +308,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         my_players = list(roster_map.get(my_team, {}).keys())
         my_player_data = [{"Player": p, "Value": get_asset_value(p), "Pos": get_position(p, my_team)} for p in my_players]
         my_player_data = sorted(my_player_data, key=lambda x: x['Value'], reverse=True)
+        my_starters = get_starters(my_player_data)
         
         keepers = my_player_data[:4]
         trade_block = my_player_data[4:]
@@ -373,7 +404,9 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         if my_strategy == "ACQUIRE_ELITE":
             my_trade_pool = available_keepers_to_send[-2:] + available_bench[:3] + my_picks[:3]
         elif my_strategy == "DEPTH":
-            my_trade_pool = available_keepers_to_send[-1:] + available_bench[:4] + [p for p in my_picks if "Round 1" not in p['Player']][:2]
+            avail_k_depth = [k for k in available_keepers_to_send if k['Player'] not in my_starters]
+            avail_b_depth = [b for b in available_bench if b['Player'] not in my_starters]
+            my_trade_pool = avail_k_depth[-1:] + avail_b_depth[:4] + [p for p in my_picks if "Round 1" not in p['Player']][:2]
         else:
             my_trade_pool = my_player_data[:4] + my_picks[:1]
 
@@ -385,6 +418,8 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             
             other_players = [{"Player": p, "Value": get_asset_value(p), "Pos": get_position(p, other_team)} for p in roster_map.get(other_team, {}).keys()]
             other_players = sorted(other_players, key=lambda x: x['Value'], reverse=True)
+            other_starters = get_starters(other_players)
+            
             other_keepers = other_players[:4]
             other_block = other_players[4:]
             other_picks = [{"Player": p, "Value": get_asset_value(p), "Pos": "PICK"} for p in team_picks.get(other_team, [])]
@@ -395,7 +430,9 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             if my_strategy == "ACQUIRE_ELITE":
                 their_trade_pool = other_keepers[:3] + other_block[:1]
             elif my_strategy == "DEPTH":
-                their_trade_pool = other_keepers[2:4] + other_block[:3] + other_picks[:1]
+                their_avail_k = [k for k in other_keepers if k['Player'] not in other_starters]
+                their_avail_b = [b for b in other_block if b['Player'] not in other_starters]
+                their_trade_pool = their_avail_k[:2] + their_avail_b[:3] + other_picks[:1]
             else:
                 their_trade_pool = other_picks[:3] + other_keepers[2:4] + other_block[:2]
 
@@ -422,7 +459,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                             incoming_players = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
                             if not incoming_players: continue
                             
-                            # NEW LOGIC: Enforce injury ban for Depth trades
                             injured_targets = [p for p in incoming_players if is_player_injured(p['Player'], other_team)]
                             if injured_targets:
                                 continue
