@@ -49,6 +49,28 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
     sorted_global_players = value_df.sort_values(by="Value", ascending=False).reset_index(drop=True)
     keeper_cutoff_value = sorted_global_players.iloc[53]['Value'] if len(sorted_global_players) > 53 else 1500
 
+    # BASELINE MAPPING FOR FUTURE PICKS (Pre-API Rookies)
+    def get_future_pick_value(round_val, slot_val, sorted_df):
+        if round_val == 1:
+            if slot_val == 1:
+                return 8000 # Hardcoded Generational Prospect Value
+            elif slot_val == 2:
+                return sorted_df.iloc[29]['Value'] if len(sorted_df) > 29 else 4000
+            elif slot_val == 3:
+                return sorted_df.iloc[39]['Value'] if len(sorted_df) > 39 else 3000
+            elif slot_val == 4:
+                return sorted_df.iloc[44]['Value'] if len(sorted_df) > 44 else 2500
+            else:
+                rank = 41 + slot_val
+                idx = rank - 1
+                return sorted_df.iloc[idx]['Value'] if len(sorted_df) > idx else 1500
+        elif round_val == 2:
+            return sorted_df.iloc[65]['Value'] if len(sorted_df) > 65 else 800
+        elif round_val == 3:
+            return sorted_df.iloc[77]['Value'] if len(sorted_df) > 77 else 400
+        else:
+            return 50
+
     user_dict = {u.get('user_id'): u for u in users}
     roster_id_to_team_name = {}
     team_records = {}
@@ -133,7 +155,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             for slot_str, r_id in current_draft['slot_to_roster_id'].items():
                 roster_id_to_slot[int(r_id)] = int(slot_str)
 
-    # --- DYNAMIC STANDINGS-BASED PROJECTED SLOTS (e.g. 2027) ---
+    # --- DYNAMIC STANDINGS-BASED PROJECTED SLOTS ---
     roster_standings = []
     has_games_played = False
     for r in rosters:
@@ -161,7 +183,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             key = (round(r['win_pct'], 4), r['wins'], r['losses'])
             record_groups[key].append(r['roster_id'])
 
-        # Worst record drafts earliest (pick 1, 2, 3...)
         sorted_keys = sorted(record_groups.keys(), key=lambda k: (k[0], k[1], -k[2]))
 
         curr_slot = 1
@@ -196,12 +217,13 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             sort_slot = 99
             assigned_val = 50
 
-            # 1. Official draft order set in Sleeper
-            if str(season_val) == str(league_season) and orig_roster_id in roster_id_to_slot:
+            # 1. Official draft order set in Sleeper (Typically Offseason/Pre-Draft)
+            if str(season_val) == str(league_season) and orig_roster_id in roster_id_to_slot and str(starting_draft_year) == str(league_season):
                 base_slot = roster_id_to_slot[orig_roster_id]
                 effective_slot = (num_teams - base_slot + 1) if round_val % 2 == 0 else base_slot
                 sort_slot = effective_slot
                 base_str += f" ({round_val}.{effective_slot:02d})"
+                
                 overall_idx = ((round_val - 1) * num_teams) + (effective_slot - 1)
                 assigned_val = draft_pool_values[overall_idx] if overall_idx < len(draft_pool_values) else 50
 
@@ -209,7 +231,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             elif str(season_val) == str(starting_draft_year) and orig_roster_id in roster_projected_slots:
                 allocated_slots = roster_projected_slots[orig_roster_id]
                 
-                # Apply snake draft reversal to even rounds
                 if round_val % 2 == 0:
                     round_slots = [num_teams - s + 1 for s in allocated_slots]
                 else:
@@ -224,21 +245,14 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     max_s = max(round_slots)
                     base_str += f" (Proj. {round_val}.{min_s:02d}-{round_val}.{max_s:02d})"
                 
-                # Average values across all tied slots
-                slot_values = []
-                for s in round_slots:
-                    idx = ((round_val - 1) * num_teams) + (s - 1)
-                    if idx < len(draft_pool_values):
-                        slot_values.append(draft_pool_values[idx])
-                    else:
-                        slot_values.append(50)
+                # Fetch baseline values for the projected slots instead of using the depleted Draft Pool
+                slot_values = [get_future_pick_value(round_val, s, sorted_global_players) for s in round_slots]
                 assigned_val = int(round(sum(slot_values) / len(slot_values)))
 
             # 3. Future picks (2028, 2029+)
             else:
                 sort_slot = mid_slot
-                idx = ((round_val - 1) * num_teams) + (mid_slot - 1)
-                assigned_val = draft_pool_values[idx] if idx < len(draft_pool_values) else 50
+                assigned_val = get_future_pick_value(round_val, mid_slot, sorted_global_players)
 
             pick_str = base_str if pick["current_owner_id"] == pick["original_roster_id"] else f"{base_str} (via {orig_owner_team})"
             pick_values_dict[pick_str] = assigned_val
@@ -315,7 +329,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
 
         my_record = team_records.get(my_team, {'wins': 0, 'losses': 0})
         
-        # Dynamic Strategy Assignment
         if is_offseason:
             st.markdown("*Strategic Focus: **Offseason** (Consolidating depth into 4 Elite Keepers)*")
             my_strategy = "CONSOLIDATE"
@@ -459,7 +472,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
 
     # --- PAGE 2: TRADE CALCULATOR ---
     def render_trade_calculator():
-        st.title("⚖️️ The Trade Ledger")
+        st.title("⚖️ The Trade Ledger")
         
         col1, col2 = st.columns(2)
         with col1:
