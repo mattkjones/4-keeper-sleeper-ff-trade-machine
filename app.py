@@ -127,6 +127,15 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             return pos or 'UNK'
         return 'UNK'
 
+    def is_player_injured(player_name, team_name):
+        pid = roster_map.get(team_name, {}).get(player_name)
+        if pid and nfl_players.get(pid):
+            status = nfl_players[pid].get('injury_status')
+            # Filter out players who are officially Out, on IR, or PUP
+            if status and status.upper() in ['OUT', 'IR', 'PUP']:
+                return True
+        return False
+
     draft_pool_df = value_df[~value_df['Player'].isin(all_rostered_players)].sort_values(by="Value", ascending=False).reset_index(drop=True)
     draft_pool_values = draft_pool_df['Value'].tolist()
 
@@ -316,7 +325,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         with ai_col_btn:
             st.button("🔄 Refresh Trades", use_container_width=True)
 
-        # USER STRATEGY SELF-SELECTION
         chosen_strategy = st.radio(
             "Select Team Objective:",
             [
@@ -327,8 +335,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             index=0
         )
 
-        # UNTOUCHABLES FILTER
-        # Elite studs (value > 7500, or top 2 keepers) are strictly protected unless explicitly tanking
         if "Tank" in chosen_strategy:
             user_untouchables = set()
             my_strategy = "TANK"
@@ -336,7 +342,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             user_untouchables = {k['Player'] for k in keepers[:3] if k['Value'] >= 4500}
             my_strategy = "DEPTH"
         else:
-            # "Acquire Elite Talent" mode protects the elite tier-1 core
             user_untouchables = {k['Player'] for k in keepers[:2]}
             for k in keepers:
                 if k['Value'] >= 7500:
@@ -362,18 +367,14 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     combos.append({"assets": names, "full_assets": c, "raw_value": raw_val, "taxed_value": taxed_val, "count": r})
             return combos
 
-        # Construct eligible assets to send based on strategy
         available_keepers_to_send = [k for k in keepers if k['Player'] not in user_untouchables]
         available_bench = [b for b in trade_block if b['Player'] not in user_untouchables and b['Value'] >= 400]
         
         if my_strategy == "ACQUIRE_ELITE":
-            # Packaging fringe keeper (keeper #4), top bench, and premier draft picks
             my_trade_pool = available_keepers_to_send[-2:] + available_bench[:3] + my_picks[:3]
         elif my_strategy == "DEPTH":
-            # Packaging mid-level picks and bench players
             my_trade_pool = available_keepers_to_send[-1:] + available_bench[:4] + [p for p in my_picks if "Round 1" not in p['Player']][:2]
         else:
-            # Tanking: Open to sending older top players for picks
             my_trade_pool = my_player_data[:4] + my_picks[:1]
 
         my_packages = get_packages(my_trade_pool, max_items=3)
@@ -389,11 +390,9 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             other_picks = [{"Player": p, "Value": get_asset_value(p), "Pos": "PICK"} for p in team_picks.get(other_team, [])]
             other_rec = team_records.get(other_team, {'wins': 0, 'losses': 0})
             
-            # Partner Alignment: Contending teams rarely sell their top player for picks mid-season
             is_other_team_rebuilding = other_rec['losses'] > other_rec['wins']
 
             if my_strategy == "ACQUIRE_ELITE":
-                # Target other team's top players (especially from struggling squads or positional surpluses)
                 their_trade_pool = other_keepers[:3] + other_block[:1]
             elif my_strategy == "DEPTH":
                 their_trade_pool = other_keepers[2:4] + other_block[:3] + other_picks[:1]
@@ -409,38 +408,34 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     if diff <= (my_pkg['taxed_value'] * 0.10):
                         if my_pkg['taxed_value'] < 1200: continue
                         
-                        # Directional enforcement
                         if my_strategy == "ACQUIRE_ELITE":
-                            # We must be consolidating (sending >= assets to receive fewer, higher-quality assets)
                             if my_pkg['count'] < their_pkg['count']: continue
                             
-                            # Verify incoming player is genuinely an elite keeper upgrade
                             incoming_players = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
                             if not incoming_players: continue
                             best_incoming = max(p['Value'] for p in incoming_players)
                             
-                            # Must be better than our 4th keeper to justify paying a package
                             if len(keepers) >= 4 and best_incoming <= (keepers[3]['Value'] + 300):
                                 continue
                                 
                         elif my_strategy == "DEPTH":
-                            # We are looking for 1-for-2, 2-for-2, or pick-for-player trades that return immediate starters
                             incoming_players = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
                             if not incoming_players: continue
+                            
+                            # NEW LOGIC: Enforce injury ban for Depth trades
+                            injured_targets = [p for p in incoming_players if is_player_injured(p['Player'], other_team)]
+                            if injured_targets:
+                                continue
+
                         else:
-                            # Tanking: Must receive at least one high draft pick
                             incoming_picks = [p for p in their_pkg['full_assets'] if p['Pos'] == 'PICK']
                             if not incoming_picks: continue
 
-                        # Realistic Partner Check
-                        # If offering picks for their elite player, ensure the other team isn't 3-0 / undefeated
                         if my_strategy == "ACQUIRE_ELITE":
                             has_picks_sent = any(p['Pos'] == 'PICK' for p in my_pkg['full_assets'])
                             if has_picks_sent and not is_other_team_rebuilding and other_rec['wins'] >= 2:
-                                # High winning teams rarely sell elite studs for future picks
                                 continue
 
-                        # Impact Scoring
                         impact_score = my_pkg['taxed_value']
                         incoming_players_all = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
                         
