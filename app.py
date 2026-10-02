@@ -50,7 +50,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
 
     user_dict = {u.get('user_id'): u for u in users}
     roster_id_to_team_name = {}
-    team_records = {} # NEW: Dictionary to store win/loss records
+    team_records = {}
     
     for roster in rosters:
         r_id = roster.get('roster_id')
@@ -65,7 +65,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             formatted_name = f"{t_name} ({display_name})"
         roster_id_to_team_name[r_id] = formatted_name
         
-        # Read the live Win/Loss record for the dynamic AI logic
         settings = roster.get('settings') or {}
         team_records[formatted_name] = {
             'wins': settings.get('wins', 0),
@@ -117,6 +116,13 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         if not current_draft:
             current_draft = next((d for d in drafts if d.get('season') == str(league_season)), None)
 
+    # --- DYNAMIC DRAFT ROLLOVER LOGIC ---
+    # If the league is currently in-season or the draft has already completed, 
+    # we roll the available trade picks forward to the next year.
+    starting_draft_year = league_season
+    if league_info.get('status') in ['in_season', 'post_season', 'complete'] or (current_draft and current_draft.get('status') == 'complete'):
+        starting_draft_year = league_season + 1
+
     if current_draft:
         if current_draft.get('draft_order'):
             user_to_slot = current_draft['draft_order']
@@ -128,7 +134,8 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             for slot_str, r_id in current_draft['slot_to_roster_id'].items():
                 roster_id_to_slot[int(r_id)] = int(slot_str)
 
-    for year in range(league_season, league_season + 3):
+    # Use the dynamically determined starting_draft_year
+    for year in range(starting_draft_year, starting_draft_year + 3):
         for r in range(1, draft_rounds + 1):
             for rid in roster_id_to_team_name.keys():
                 all_picks.append({"season": str(year), "round": r, "original_roster_id": rid, "current_owner_id": rid})
@@ -268,7 +275,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     combos.append({"assets": names, "full_assets": c, "raw_value": raw_val, "taxed_value": taxed_val, "count": r})
             return combos
 
-        # Setup My Trade Pool based on dynamic strategy
         if my_strategy == "CONSOLIDATE":
             viable_bench = [p for p in trade_block if p['Value'] >= keeper_cutoff_value] if is_offseason else trade_block[:3]
             my_trade_pool = (keepers[-1:] if len(keepers)==4 else []) + viable_bench[:3] + my_picks[:2]
@@ -287,7 +293,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             other_block = other_players[4:]
             other_picks = [{"Player": p, "Value": get_asset_value(p), "Pos": "PICK"} for p in team_picks.get(other_team, [])]
             
-            # Read the other team's win/loss record to determine what they are likely willing to do
             other_record = team_records.get(other_team, {'wins': 0, 'losses': 0})
             if is_offseason:
                 other_strategy = "CONSOLIDATE"
@@ -309,7 +314,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     if diff <= (my_pkg['taxed_value'] * 0.10):
                         if my_pkg['taxed_value'] < 1000: continue
                         
-                        # Enforce Directional Logic based on Strategy
                         if my_strategy == "CONSOLIDATE":
                             if my_pkg['count'] < their_pkg['count']: continue
                         else:
