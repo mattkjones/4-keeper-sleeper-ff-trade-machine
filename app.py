@@ -49,11 +49,10 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
     sorted_global_players = value_df.sort_values(by="Value", ascending=False).reset_index(drop=True)
     keeper_cutoff_value = sorted_global_players.iloc[53]['Value'] if len(sorted_global_players) > 53 else 1500
 
-    # BASELINE MAPPING FOR FUTURE PICKS (Pre-API Rookies)
     def get_future_pick_value(round_val, slot_val, sorted_df):
         if round_val == 1:
             if slot_val == 1:
-                return 8000 # Hardcoded Generational Prospect Value
+                return 8000
             elif slot_val == 2:
                 return sorted_df.iloc[29]['Value'] if len(sorted_df) > 29 else 4000
             elif slot_val == 3:
@@ -89,9 +88,16 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         roster_id_to_team_name[r_id] = formatted_name
         
         settings = roster.get('settings') or {}
+        fpts = settings.get('fpts', 0)
+        fpts_decimal = settings.get('fpts_decimal', 0)
+        fpts_against = settings.get('fpts_against', 0)
+        fpts_against_decimal = settings.get('fpts_against_decimal', 0)
+        
         team_records[formatted_name] = {
             'wins': settings.get('wins', 0),
-            'losses': settings.get('losses', 0)
+            'losses': settings.get('losses', 0),
+            'pf': round(fpts + (fpts_decimal / 100), 1),
+            'pa': round(fpts_against + (fpts_against_decimal / 100), 1)
         }
 
     team_names = list(roster_id_to_team_name.values())
@@ -139,7 +145,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         if not current_draft:
             current_draft = next((d for d in drafts if d.get('season') == str(league_season)), None)
 
-    # Dynamic Draft Rollover
     starting_draft_year = league_season
     if league_info.get('status') in ['in_season', 'post_season', 'complete'] or (current_draft and current_draft.get('status') == 'complete'):
         starting_draft_year = league_season + 1
@@ -155,7 +160,6 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             for slot_str, r_id in current_draft['slot_to_roster_id'].items():
                 roster_id_to_slot[int(r_id)] = int(slot_str)
 
-    # --- DYNAMIC STANDINGS-BASED PROJECTED SLOTS ---
     roster_standings = []
     has_games_played = False
     for r in rosters:
@@ -212,44 +216,29 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         if curr_owner_team:
             season_val, round_val, orig_roster_id = int(pick['season']), int(pick['round']), pick["original_roster_id"]
             base_str = f"{season_val} Round {round_val}"
-            
             mid_slot = num_teams // 2
             sort_slot = 99
             assigned_val = 50
 
-            # 1. Official draft order set in Sleeper (Typically Offseason/Pre-Draft)
             if str(season_val) == str(league_season) and orig_roster_id in roster_id_to_slot and str(starting_draft_year) == str(league_season):
                 base_slot = roster_id_to_slot[orig_roster_id]
                 effective_slot = (num_teams - base_slot + 1) if round_val % 2 == 0 else base_slot
                 sort_slot = effective_slot
                 base_str += f" ({round_val}.{effective_slot:02d})"
-                
                 overall_idx = ((round_val - 1) * num_teams) + (effective_slot - 1)
                 assigned_val = draft_pool_values[overall_idx] if overall_idx < len(draft_pool_values) else 50
-
-            # 2. In-Season Projected Standings for the upcoming draft (2027)
             elif str(season_val) == str(starting_draft_year) and orig_roster_id in roster_projected_slots:
                 allocated_slots = roster_projected_slots[orig_roster_id]
-                
-                if round_val % 2 == 0:
-                    round_slots = [num_teams - s + 1 for s in allocated_slots]
-                else:
-                    round_slots = allocated_slots
-                
+                round_slots = [num_teams - s + 1 for s in allocated_slots] if round_val % 2 == 0 else allocated_slots
                 sort_slot = sum(round_slots) / len(round_slots)
                 
                 if len(round_slots) == 1:
                     base_str += f" (Proj. {round_val}.{round_slots[0]:02d})"
                 else:
-                    min_s = min(round_slots)
-                    max_s = max(round_slots)
-                    base_str += f" (Proj. {round_val}.{min_s:02d}-{round_val}.{max_s:02d})"
+                    base_str += f" (Proj. {round_val}.{min(round_slots):02d}-{round_val}.{max(round_slots):02d})"
                 
-                # Fetch baseline values for the projected slots instead of using the depleted Draft Pool
                 slot_values = [get_future_pick_value(round_val, s, sorted_global_players) for s in round_slots]
                 assigned_val = int(round(sum(slot_values) / len(slot_values)))
-
-            # 3. Future picks (2028, 2029+)
             else:
                 sort_slot = mid_slot
                 assigned_val = get_future_pick_value(round_val, mid_slot, sorted_global_players)
@@ -269,9 +258,12 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
     # --- PAGE 1: HOME PAGE (DASHBOARD) ---
     def render_home_page():
         st.title("🏠 My Team Dashboard")
-        st.markdown("Analyze your roster, view your draft capital, and find dynamic multi-asset trade opportunities.")
+        st.markdown("Analyze your roster, track draft capital, and evaluate situational trade opportunities.")
         
         my_team = st.selectbox("Select Your Team:", team_names, index=0)
+        
+        my_rec = team_records.get(my_team, {'wins': 0, 'losses': 0, 'pf': 0.0, 'pa': 0.0})
+        st.caption(f"📊 **Current Record:** {my_rec['wins']}-{my_rec['losses']} | **PF:** {my_rec['pf']} | **PA:** {my_rec['pa']}")
         st.divider()
         
         my_players = list(roster_map.get(my_team, {}).keys())
@@ -320,27 +312,41 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         # --- THE MULTI-ASSET AI ENGINE ---
         ai_col_title, ai_col_btn = st.columns([4, 1])
         with ai_col_title:
-            st.subheader("🤖 AI Package Trade Generator")
+            st.subheader("🤖 AI Trade Generator")
         with ai_col_btn:
             st.button("🔄 Refresh Trades", use_container_width=True)
 
-        phase = st.radio("Season Phase:", ["🌴 Offseason", "🏈 In-Season"], horizontal=True)
-        is_offseason = "Offseason" in phase
+        # USER STRATEGY SELF-SELECTION
+        chosen_strategy = st.radio(
+            "Select Team Objective:",
+            [
+                "🔥 Acquire Elite Talent (Package picks/depth to land a premier keeper)",
+                "📦 Build Depth (Package mid-tier picks & players for starter depth)",
+                "🏗️ Tank & Rebuild (Liquidate veteran assets for picks & young keepers)"
+            ],
+            index=0
+        )
 
-        my_record = team_records.get(my_team, {'wins': 0, 'losses': 0})
-        
-        if is_offseason:
-            st.markdown("*Strategic Focus: **Offseason** (Consolidating depth into 4 Elite Keepers)*")
-            my_strategy = "CONSOLIDATE"
+        # UNTOUCHABLES FILTER
+        # Elite studs (value > 7500, or top 2 keepers) are strictly protected unless explicitly tanking
+        if "Tank" in chosen_strategy:
+            user_untouchables = set()
+            my_strategy = "TANK"
+        elif "Build Depth" in chosen_strategy:
+            user_untouchables = {k['Player'] for k in keepers[:3] if k['Value'] >= 4500}
+            my_strategy = "DEPTH"
         else:
-            if my_record['wins'] >= my_record['losses']:
-                st.markdown(f"*Strategic Focus: **In-Season Contender** ({my_record['wins']}-{my_record['losses']}) — Leveraging picks & bench depth to acquire premium starters.*")
-                my_strategy = "CONSOLIDATE"
-            else:
-                st.markdown(f"*Strategic Focus: **In-Season Rebuilder** ({my_record['wins']}-{my_record['losses']}) — Liquidating elite assets for draft capital & youth.*")
-                my_strategy = "LIQUIDATE"
+            # "Acquire Elite Talent" mode protects the elite tier-1 core
+            user_untouchables = {k['Player'] for k in keepers[:2]}
+            for k in keepers:
+                if k['Value'] >= 7500:
+                    user_untouchables.add(k['Player'])
+            my_strategy = "ACQUIRE_ELITE"
 
-        st.markdown("*Note: The AI applies a 'Consolidation Tax' (10-15% penalty) to the team trading away more assets, ensuring realistic package deals.*")
+        if user_untouchables:
+            st.caption(f"🔒 **Protected Assets (Untouchable):** {', '.join(user_untouchables)}")
+
+        st.markdown("*Note: The AI applies a 'Consolidation Tax' (10-15% penalty) to the team sending more assets, preventing uneven multi-player offers.*")
 
         suggestions = []
         seen_trades = set() 
@@ -356,11 +362,19 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                     combos.append({"assets": names, "full_assets": c, "raw_value": raw_val, "taxed_value": taxed_val, "count": r})
             return combos
 
-        if my_strategy == "CONSOLIDATE":
-            viable_bench = [p for p in trade_block if p['Value'] >= keeper_cutoff_value] if is_offseason else trade_block[:3]
-            my_trade_pool = (keepers[-1:] if len(keepers)==4 else []) + viable_bench[:3] + my_picks[:2]
+        # Construct eligible assets to send based on strategy
+        available_keepers_to_send = [k for k in keepers if k['Player'] not in user_untouchables]
+        available_bench = [b for b in trade_block if b['Player'] not in user_untouchables and b['Value'] >= 400]
+        
+        if my_strategy == "ACQUIRE_ELITE":
+            # Packaging fringe keeper (keeper #4), top bench, and premier draft picks
+            my_trade_pool = available_keepers_to_send[-2:] + available_bench[:3] + my_picks[:3]
+        elif my_strategy == "DEPTH":
+            # Packaging mid-level picks and bench players
+            my_trade_pool = available_keepers_to_send[-1:] + available_bench[:4] + [p for p in my_picks if "Round 1" not in p['Player']][:2]
         else:
-            my_trade_pool = keepers[:2] + trade_block[:2] + my_picks[:1]
+            # Tanking: Open to sending older top players for picks
+            my_trade_pool = my_player_data[:4] + my_picks[:1]
 
         my_packages = get_packages(my_trade_pool, max_items=3)
         my_current_pos = [k['Pos'] for k in keepers]
@@ -373,62 +387,73 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             other_keepers = other_players[:4]
             other_block = other_players[4:]
             other_picks = [{"Player": p, "Value": get_asset_value(p), "Pos": "PICK"} for p in team_picks.get(other_team, [])]
+            other_rec = team_records.get(other_team, {'wins': 0, 'losses': 0})
             
-            other_record = team_records.get(other_team, {'wins': 0, 'losses': 0})
-            if is_offseason:
-                other_strategy = "CONSOLIDATE"
-            else:
-                other_strategy = "CONSOLIDATE" if other_record['wins'] >= other_record['losses'] else "LIQUIDATE"
+            # Partner Alignment: Contending teams rarely sell their top player for picks mid-season
+            is_other_team_rebuilding = other_rec['losses'] > other_rec['wins']
 
-            if other_strategy == "CONSOLIDATE":
-                their_viable_bench = [p for p in other_block if p['Value'] >= keeper_cutoff_value] if is_offseason else other_block[:3]
-                their_trade_pool = other_keepers[1:4] + their_viable_bench[:2] + other_picks[:2]
+            if my_strategy == "ACQUIRE_ELITE":
+                # Target other team's top players (especially from struggling squads or positional surpluses)
+                their_trade_pool = other_keepers[:3] + other_block[:1]
+            elif my_strategy == "DEPTH":
+                their_trade_pool = other_keepers[2:4] + other_block[:3] + other_picks[:1]
             else:
-                their_trade_pool = other_keepers[:3] + other_block[:3] + other_picks[:1]
+                their_trade_pool = other_picks[:3] + other_keepers[2:4] + other_block[:2]
 
-            their_packages = get_packages(their_trade_pool, max_items=3)
+            their_packages = get_packages(their_trade_pool, max_items=2)
 
             for my_pkg in my_packages:
                 for their_pkg in their_packages:
                     
                     diff = abs(my_pkg['taxed_value'] - their_pkg['taxed_value'])
                     if diff <= (my_pkg['taxed_value'] * 0.10):
-                        if my_pkg['taxed_value'] < 1000: continue
+                        if my_pkg['taxed_value'] < 1200: continue
                         
-                        if my_strategy == "CONSOLIDATE":
+                        # Directional enforcement
+                        if my_strategy == "ACQUIRE_ELITE":
+                            # We must be consolidating (sending >= assets to receive fewer, higher-quality assets)
                             if my_pkg['count'] < their_pkg['count']: continue
-                        else:
-                            if my_pkg['count'] > their_pkg['count']: continue
-
-                        if is_offseason:
-                            my_incoming_players = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
-                            their_incoming_players = [p for p in my_pkg['full_assets'] if p['Pos'] != 'PICK']
                             
-                            my_sim = [p for p in my_player_data if p['Player'] not in my_pkg['assets']] + my_incoming_players
-                            my_sim = sorted(my_sim, key=lambda x: x['Value'], reverse=True)
-                            my_new_top_4 = [p['Player'] for p in my_sim[:4]]
-                            if not all(p['Player'] in my_new_top_4 for p in my_incoming_players):
-                                continue 
+                            # Verify incoming player is genuinely an elite keeper upgrade
+                            incoming_players = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
+                            if not incoming_players: continue
+                            best_incoming = max(p['Value'] for p in incoming_players)
+                            
+                            # Must be better than our 4th keeper to justify paying a package
+                            if len(keepers) >= 4 and best_incoming <= (keepers[3]['Value'] + 300):
+                                continue
                                 
-                            their_sim = [p for p in other_players if p['Player'] not in their_pkg['assets']] + their_incoming_players
-                            their_sim = sorted(their_sim, key=lambda x: x['Value'], reverse=True)
-                            their_new_top_4 = [p['Player'] for p in their_sim[:4]]
-                            if not all(p['Player'] in their_new_top_4 for p in their_incoming_players):
+                        elif my_strategy == "DEPTH":
+                            # We are looking for 1-for-2, 2-for-2, or pick-for-player trades that return immediate starters
+                            incoming_players = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
+                            if not incoming_players: continue
+                        else:
+                            # Tanking: Must receive at least one high draft pick
+                            incoming_picks = [p for p in their_pkg['full_assets'] if p['Pos'] == 'PICK']
+                            if not incoming_picks: continue
+
+                        # Realistic Partner Check
+                        # If offering picks for their elite player, ensure the other team isn't 3-0 / undefeated
+                        if my_strategy == "ACQUIRE_ELITE":
+                            has_picks_sent = any(p['Pos'] == 'PICK' for p in my_pkg['full_assets'])
+                            if has_picks_sent and not is_other_team_rebuilding and other_rec['wins'] >= 2:
+                                # High winning teams rarely sell elite studs for future picks
                                 continue
 
+                        # Impact Scoring
                         impact_score = my_pkg['taxed_value']
-                        my_incoming_players_all = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
+                        incoming_players_all = [p for p in their_pkg['full_assets'] if p['Pos'] != 'PICK']
                         
-                        for p in my_incoming_players_all:
+                        for p in incoming_players_all:
                             if p['Pos'] not in my_current_pos and p['Pos'] in ['RB', 'WR', 'TE', 'QB']:
                                 impact_score += 1500 
                                 
-                        if my_incoming_players_all and len(keepers) == 4:
-                            best_incoming_val = max(p['Value'] for p in my_incoming_players_all)
-                            if best_incoming_val > keepers[3]['Value'] + 800:
+                        if incoming_players_all and len(keepers) == 4:
+                            best_incoming_val = max(p['Value'] for p in incoming_players_all)
+                            if best_incoming_val > (keepers[3]['Value'] + 800):
                                 impact_score += 2500 
                                 
-                        impact_score += random.randint(-500, 500)
+                        impact_score += random.randint(-400, 400)
 
                         trade_type = f"{my_pkg['count']}-for-{their_pkg['count']}"
                         send_str = " + ".join(my_pkg['assets'])
@@ -439,10 +464,12 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
                         if trade_key not in seen_trades:
                             seen_trades.add(trade_key)
                             
-                            if my_strategy == "CONSOLIDATE":
-                                logic_str = f"Consolidating into a premium asset." if my_pkg['count'] > their_pkg['count'] else "Even-asset roster upgrade."
+                            if my_strategy == "ACQUIRE_ELITE":
+                                logic_str = f"Targeted keeper upgrade: Consolidating capital into {rec_str}."
+                            elif my_strategy == "DEPTH":
+                                logic_str = f"Lineup fortification: Turning surplus assets into starting contributors."
                             else:
-                                logic_str = f"Liquidating elite asset for depth/picks." if my_pkg['count'] < their_pkg['count'] else "Even-asset pivot for future upside."
+                                logic_str = f"Rebuilding pivot: Liquidating veteran value for future draft capital."
                             
                             sug_text = f"**Trade with {other_team} [{trade_type}]:**\n* **You Send:** {send_str} *(Raw: {int(my_pkg['raw_value']):,})*\n* **You Receive:** {rec_str} *(Raw: {int(their_pkg['raw_value']):,})*\n*Logic: {logic_str}*"
                             
@@ -468,7 +495,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
             for sug in final_suggestions: 
                 st.info(sug['text'])
         else:
-            st.success("No suggested trades align with your team's current strategic focus. Try adjusting your roster manually in the Ledger.")
+            st.success("No high-probability trades found matching this strategic objective right now. Try switching objectives or testing offers in the Ledger.")
 
     # --- PAGE 2: TRADE CALCULATOR ---
     def render_trade_calculator():
@@ -514,7 +541,7 @@ if league_info and users and rosters and nfl_players and not value_df.empty:
         b_has_dupes = len(team_b_offers) != len(set(team_b_offers))
         
         if a_has_dupes or b_has_dupes:
-            st.warning("⚠️ **Duplicate Assets Detected:** You have added the same asset multiple times. The calculator has automatically filtered them out to ensure accurate valuation.")
+            st.warning("⚠️ **Duplicate Assets Detected:** Duplicate selections have been automatically removed from evaluation.")
             team_a_offers = list(dict.fromkeys(team_a_offers))
             team_b_offers = list(dict.fromkeys(team_b_offers))
 
